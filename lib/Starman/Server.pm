@@ -2,7 +2,6 @@ package Starman::Server;
 use strict;
 use base 'Net::Server::PreFork';
 
-use Class::Method::Modifiers;
 use Data::Dump qw(dump);
 use Socket qw(IPPROTO_TCP TCP_NODELAY);
 use IO::Socket qw(:crlf);
@@ -104,21 +103,6 @@ sub run_parent {
 
 # The below methods run in the child process
 
-after accept => sub {
-    my $self = shift @_;
-
-    DEBUG && warn 'client/sock class was: ' . ref $self->{server}->{client};
-    Net::Server::Proto::SSL->start_SSL(
-        $self->{server}->{client},
-
-        SSL_server      => 1,
-        SSL_key_file    => 'key.pem',
-        SSL_cert_file   => 'cert.pem',
-        SSL_ca_file     => 'cacert.pem',
-        SSL_passwd_cb   => sub { 'password' },
-    );
-};
-
 sub child_init_hook {
     my $self = shift;
     if ($self->{options}->{psgi_app_builder}) {
@@ -136,6 +120,19 @@ sub post_accept_hook {
         inputbuf  => '',
         keepalive => 1,
     };
+
+    DEBUG && warn 'client/sock class was: ' . ref $self->{server}->{client};
+    Net::Server::Proto::SSL->start_SSL(
+        $self->{server}->{client},
+
+        SSL_server      => 1,
+        SSL_key_file    => 'key.pem',
+        SSL_cert_file   => 'cert.pem',
+        SSL_ca_file     => 'cacert.pem',
+        SSL_passwd_cb   => sub { 'password' },
+    );
+
+    return;
 }
 
 sub process_request {
