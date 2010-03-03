@@ -39,6 +39,42 @@ sub run {
         $options->{keepalive} = 1;
     }
 
+    ## RATHER, use new opts --ssl-listen, --ssl-context
+    #       hostname:port               # "default" ssl context
+    #       hostname:port:sslopts...    # self-defined context
+    #       hostname:port:ssl-ctx-1     # "named" context
+    #
+    # track via $self->{ssl_contexts}->{ip:port} = { SSL_... => ... }
+
+    # some helper subs
+    my (%ssl_addr, %ssl_ctx) = () x 2;
+    my $get_context = sub { $ssl_ctx{$_[0]} || die "No ssl context: $_[0]\n" };
+
+    for my $ssl_context (_list($options->{'ssl_context'})) {
+
+        # split; if even then we're the global context
+        my @p = split /:/, $ssl_context;
+        my $name = @p % 2 ? shift @p : '__GLOBAL__';
+        $ssl_ctx{$name} = _ssl_split(@p);
+    }
+
+    for my $ssl (_list($options->{'ssl_listen'})) {
+
+        my @p = split /:/, $ssl;
+
+        # push onto listen, and retain
+        my $addr = shift(@p) . ':' . shift(@p);
+        push @{$options->{listen}}, $addr;
+
+        # 0, global context.  1, named context.  2+ args
+        $ssl_addr{$addr} = @p == 0 ? $get_context->('__GLOBAL__')
+                         : @p == 1 ? $get_context->(pop @p)
+                         :           _ssl_split(@p)
+                         ;
+    }
+
+    $self->{ssl_contexts} = \%ssl_addr;
+
     my($host, $port, $proto);
     for my $listen (@{$options->{listen} || [ "$options->{host}:$options->{port}" ]}) {
         if ($listen =~ /:/) {
@@ -101,6 +137,25 @@ sub run_parent {
     $self->SUPER::run_parent(@_);
 }
 
+sub _list { ref $_[0] ? @{$_[0]} : $_[0] }
+
+sub _ssl_split {
+
+    my %opts = map { my($a,$b) = split /=/; "SSL_$a" => $b } @_;
+
+    # normalize some bits
+    #$opts{$_.'_file'} = delete $opts{
+
+    # we _really_ should read this out of a file, but...
+    if ($opts{SSL_passwd}) {
+
+        my $password = delete $opts{SSL_passwd};
+        $opts{SSL_passwd_cb} = sub { $password };
+    }
+
+    return \%opts;
+}
+
 # The below methods run in the child process
 
 sub child_init_hook {
@@ -121,15 +176,19 @@ sub post_accept_hook {
         keepalive => 1,
     };
 
-    DEBUG && warn 'client/sock class was: ' . ref $self->{server}->{client};
+    my $addrport = "$self->{server}->{sockaddr}:$self->{server}->{sockport}";
+    return unless defined $self->{ssl_contexts}->{$addrport};
+
+    DEBUG && "converting $addrport to SSL";
     Net::Server::Proto::SSL->start_SSL(
         $self->{server}->{client},
 
         SSL_server      => 1,
-        SSL_key_file    => 'key.pem',
-        SSL_cert_file   => 'cert.pem',
-        SSL_ca_file     => 'cacert.pem',
-        SSL_passwd_cb   => sub { 'password' },
+        %{ $self->{ssl_contexts}->{$addrport} },
+        #SSL_key_file    => 'key.pem',
+        #SSL_cert_file   => 'cert.pem',
+        #SSL_ca_file     => 'cacert.pem',
+        #SSL_passwd_cb   => sub { 'password' },
     );
 
     return;
