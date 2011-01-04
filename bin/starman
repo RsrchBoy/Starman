@@ -162,6 +162,15 @@ described in C<plackup -h>.
 
 See C<plackup -h> for more options.
 
+=head1 SSL SUPPORT
+
+SSL support is still very experimental; YMMV.  After generating a ssl key,
+ca and cert, try it with:
+
+    starman --ssl-listen 127.0.0.1:8443:key_file=key.pem:ca_file=cacert.pem:cert_file=cert.pem:passwd=password
+
+Prepending STARMAN_DEBUG=1 will help give some insight into what's going on.
+
 =head1 SEE ALSO
 
 L<Starman>
