@@ -38,6 +38,9 @@ sub run {
     if (! exists $options->{keepalive}) {
         $options->{keepalive} = 1;
     }
+    if (! exists $options->{keepalive_timeout}) {
+        $options->{keepalive_timeout} = 1;
+    }
 
     ## RATHER, use new opts --ssl-listen, --ssl-context
     #       hostname:port               # "default" ssl context
@@ -160,6 +163,7 @@ sub _ssl_split {
 
 sub child_init_hook {
     my $self = shift;
+    srand();
     if ($self->{options}->{psgi_app_builder}) {
         DEBUG && warn "[$$] Initializing the PSGI app\n";
         $self->{app} = $self->{options}->{psgi_app_builder}->();
@@ -323,7 +327,7 @@ sub process_request {
             DEBUG && warn "[$$] Waiting on previous connection for keep-alive request...\n";
 
             my $sel = IO::Select->new($conn);
-            last unless $sel->can_read(1);
+            last unless $sel->can_read($self->{options}->{keepalive_timeout});
         }
     }
 
@@ -342,7 +346,7 @@ sub _read_headers {
             # Do we have a full header in the buffer?
             # This is before sysread so we don't read if we have a pipelined request
             # waiting in the buffer
-            last if $self->{client}->{inputbuf} =~ /$CRLF$CRLF/s;
+            last if defined $self->{client}->{inputbuf} && $self->{client}->{inputbuf} =~ /$CRLF$CRLF/s;
 
             # If not, read some data
             my $read = sysread $self->{server}->{client}, my $buf, CHUNKSIZE;
