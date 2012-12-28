@@ -22,6 +22,12 @@ my $null_io = do { open my $io, "<", \""; $io };
 
 use Net::Server::SIG qw(register_sig);
 
+# Override Net::Server's HUP handling - just restart all the workers and that's about it
+sub sig_hup {
+    my $self = shift;
+    $self->hup_children;
+}
+
 sub run {
     my($self, $app, $options) = @_;
 
@@ -93,7 +99,7 @@ sub run {
     }
 
     my $workers = $options->{workers} || 5;
-    local @ARGV = (@{$options->{argv} || []});
+    local @ARGV = ();
 
     $self->SUPER::run(
         port                       => $port,
@@ -101,6 +107,7 @@ sub run {
         proto                      => $proto,
         serialize                  => 'flock',
         log_level                  => DEBUG ? 4 : 2,
+        ($options->{error_log} ? ( log_file => $options->{error_log} ) : () ),
         min_servers                => $options->{min_servers}       || $workers,
         min_spare_servers          => $options->{min_spare_servers} || $workers - 1,
         max_spare_servers          => $options->{max_spare_servers} || $workers - 1,
@@ -109,7 +116,7 @@ sub run {
         user                       => $options->{user}              || $>,
         group                      => $options->{group}             || $),
         listen                     => $options->{backlog}           || 1024,
-        leave_children_open_on_hup => 1, # XXX conigurable?
+        check_for_waiting          => 1,
         no_client_stdout           => 1,
         %extra
     );
@@ -131,12 +138,38 @@ sub pre_loop_hook {
     register_sig(
         TTIN => sub { $self->{server}->{$_}++ for qw( min_servers max_servers ) },
         TTOU => sub { $self->{server}->{$_}-- for qw( min_servers max_servers ) },
+        QUIT => sub { $self->server_close(1) },
     );
+}
+
+sub server_close {
+    my($self, $quit) = @_;
+
+    if ($quit) {
+        $self->log(2, $self->log_time . " Received QUIT. Running a graceful shutdown\n");
+        $self->{server}->{$_} = 0 for qw( min_servers max_servers );
+        $self->hup_children;
+        while (1) {
+            Net::Server::SIG::check_sigs();
+            $self->coordinate_children;
+            last if !keys %{$self->{server}{children}};
+            sleep 1;
+        }
+        $self->log(2, $self->log_time . " Worker processes cleaned up\n");
+    }
+
+    $self->SUPER::server_close();
 }
 
 sub run_parent {
     my $self = shift;
     $0 = "starman master " . join(" ", @{$self->{options}{argv} || []});
+    no warnings 'redefine';
+    local *Net::Server::PreFork::register_sig = sub {
+        my %args = @_;
+        delete $args{QUIT};
+        Net::Server::SIG::register_sig(%args);
+    };
     $self->SUPER::run_parent(@_);
 }
 
@@ -216,8 +249,9 @@ sub process_request {
         my $env = {
             REMOTE_ADDR     => $self->{server}->{peeraddr},
             REMOTE_HOST     => $self->{server}->{peerhost} || $self->{server}->{peeraddr},
-            SERVER_NAME     => $self->{server}->{sockaddr}, # XXX: needs to be resolved?
-            SERVER_PORT     => $self->{server}->{sockport},
+            REMOTE_PORT     => $self->{server}->{peerport} || 0,
+            SERVER_NAME     => $self->{server}->{sockaddr} || 0, # XXX: needs to be resolved?
+            SERVER_PORT     => $self->{server}->{sockport} || 0,
             SCRIPT_NAME     => '',
             'psgi.version'      => [ 1, 1 ],
             'psgi.errors'       => *STDERR,
@@ -229,6 +263,7 @@ sub process_request {
             'psgi.multiprocess' => Plack::Util::TRUE,
             'psgix.io'          => $conn,
             'psgix.input.buffered' => Plack::Util::TRUE,
+            'psgix.harakiri' => Plack::Util::TRUE,
         };
 
         # Parse headers
@@ -306,7 +341,7 @@ sub process_request {
             if ( $self->{client}->{inputbuf} ) {
                 if ( $self->{client}->{inputbuf} =~ /^(?:GET|HEAD)/ ) {
                     if ( DEBUG ) {
-                        warn "Pipelined GET/HEAD request in input buffer: " 
+                        warn "Pipelined GET/HEAD request in input buffer: "
                             . dump( $self->{client}->{inputbuf} ) . "\n";
                     }
 
@@ -445,7 +480,7 @@ sub _prepare_env {
 
                 if ($chunk_len == 0) {
                     last DECHUNK;
-                } elsif (length $chunk_buffer < $chunk_len) {
+                } elsif (length $chunk_buffer < $chunk_len + 2) {
                     $chunk_buffer = $trailer . $chunk_buffer;
                     last;
                 }
@@ -469,6 +504,11 @@ sub _prepare_env {
 sub _finalize_response {
     my($self, $env, $res) = @_;
 
+    if ($env->{'psgix.harakiri.commit'}) {
+        $self->{client}->{keepalive} = 0;
+        $self->{client}->{harakiri} = 1;
+    }
+
     my $protocol = $env->{SERVER_PROTOCOL};
     my $status   = $res->[0];
     my $message  = status_message($status);
@@ -478,7 +518,10 @@ sub _finalize_response {
 
     # Switch on Transfer-Encoding: chunked if we don't know Content-Length.
     my $chunked;
-    while (my($k, $v) = splice @{$res->[1]}, 0, 2) {
+    my $headers = $res->[1];
+    for (my $i = 0; $i < @$headers; $i += 2) {
+        my $k = $headers->[$i];
+        my $v = $headers->[$i + 1];
         next if $k eq 'Connection';
         push @headers, "$k: $v";
         $headers{lc $k} = $v;
@@ -527,6 +570,7 @@ sub _finalize_response {
             my $buffer = $_[0];
             if ($chunked) {
                 my $len = length $buffer;
+                return unless $len;
                 $buffer = sprintf( "%x", $len ) . $CRLF . $buffer . $CRLF;
             }
             syswrite $conn, $buffer;
@@ -540,6 +584,7 @@ sub _finalize_response {
                 my $buffer = $_[0];
                 if ($chunked) {
                     my $len = length $buffer;
+                    return unless $len;
                     $buffer = sprintf( "%x", $len ) . $CRLF . $buffer . $CRLF;
                 }
                 syswrite $conn, $buffer;
@@ -548,6 +593,13 @@ sub _finalize_response {
             close => sub {
                 syswrite $conn, "0$CRLF$CRLF" if $chunked;
             };
+    }
+}
+
+sub post_client_connection_hook {
+    my $self = shift;
+    if ($self->{client}->{harakiri}) {
+        exit;
     }
 }
 

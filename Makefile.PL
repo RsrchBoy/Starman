@@ -1,5 +1,5 @@
 if ($^O eq 'MSWin32') {
-    warn "This distribution doesn't support your platform $^O\n";
+    print STDERR "OS unsupported: $^O\n";
     exit;
 }
 
@@ -17,11 +17,9 @@ requires 'HTTP::Date';
 requires 'parent';
 requires 'Test::TCP', 1.11;
 install_script 'bin/starman';
-recommends 'Server::Starter';
+recommends 'Server::Starter', 0.12;
 recommends 'Net::Server::SS::PreFork';
 test_requires 'Test::Requires';
-auto_include_deps;
-auto_install;
 author_tests('xt');
 auto_set_repository;
 WriteAll;

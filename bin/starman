@@ -24,6 +24,16 @@ my @argv = @ARGV;
 
 my $runner = Plack::Runner->new(@args);
 $runner->parse_options(@argv);
+
+if ($runner->{loader} eq 'Restarter') {
+    warn <<WARN;
+!!
+!! Using restarter with -r or -R options is known to cause issues with process supervisor
+!! such as start_server, and it is STRONGLY discouraged to use with Starman. You have been warned.
+!!
+WARN
+}
+
 $runner->set_options(argv => \@argv);
 $runner->run;
 
@@ -37,6 +47,8 @@ starman - Starman launcher
 
   starman --listen :5001 --listen /tmp/starman.sock
   starman --workers 32 --port 8080
+
+=head1 OPTIONS
 
 =over 4
 
@@ -130,6 +142,10 @@ will load the modules in the master process for memory savings with
 CoW, but the actual loading of C<myapp.psgi> is done per children,
 allowing resource managements such as database connection safer.
 
+If you enable this option, sending C<HUP> signal to the master process
+I<will not> pick up any code changes you make. See L</SIGNALS> for
+details.
+
 =item --disable-keepalive
 
 Disable Keep-alive persistent connections. It is an useful workaround
@@ -169,11 +185,89 @@ Defaults to the current group id.
 Specify the pid file path. Use it with C<-D|--daemonize> option,
 described in C<plackup -h>.
 
+=item --error-log
+
+Specify the pathname of a file where the error log should be written.
+This enables you to still have access to the errors when using C<--daemonize>.
+
 =back
 
-See C<plackup -h> for more options.
+Starman passes through other options given to L<Plack::Runner>, the
+common backend that L<plackup> uses, so the most options explained in
+C<plackup -h> such as C<--access-log> or C<--daemonize> works fine in
+starman too.
 
-C<starman> command automatically sets the environment (C<-E>) to the value of I<deployment>.
+Setting the environment variable C<STARMAN_DEBUG> to 1 makes the
+Starman server runninng in the debug mode.
+
+=cut
+
+=head1 SIGNALS
+
+=over 4
+
+=item HUP
+
+Sending C<HUP> signal to the master process will restart all the workers
+gracefully (meaning the currently running requests will shut down once
+the request is complete), and by default, the workers will pick up the
+code changes you make by reloading the application.
+
+If you enable C<--preload-app> option, however, the code will be only
+loaded in the startup process and will not pick up the code changes
+you made. If you want to preload the app I<and> do graceful restarts
+by reloading the code changes, you're recommended to use
+L<Server::Starter>, configured to send C<QUIT> signal when superdaemon
+received C<HUP>, i.e:
+
+    start_server --interval 5 --port 8080 --signal-on-hup=QUIT -- \
+      starman --preload-app myapp.psgi
+
+You will then send the HUP signal to C<start_server> process to
+gracefully reload the starman cluster (master and workers).
+
+With Server::Starter 0.12 or later, you should also be able to set
+C<--signal-on-term> to QUIT so that you can safely shutdown Starman
+first and then stop the C<start_server> daemon process as well.
+
+=item TTIN, TTOU
+
+Sending C<TTIN> signal to the master process will dynamically increase
+the number of workers, and C<TTOU> signal will decrease it.
+
+=item INT, TERM
+
+Sending C<INT> or C<TERM> signal to the master process will kill all
+the workers immediately and shut down the server.
+
+=item QUIT
+
+Sending C<QUIT> signal to the master process will gracefully shutdown
+the workers (meaning the currently running requests will shut down
+once the request is complete).
+
+=back
+
+=head1 RELOADING THE APPLICATION
+
+You're recommended to use signals (see above) to reload the
+application, and are strongly discouraged to use C<-r> or C<-R>
+(reloading flag) from plackup. These options will make a separate
+directory watcher process, and makes your life difficult if you want to
+combine with other process daemon tools such as Server::Strater.
+
+=head1 DIFFERENCES WITH PLACKUP
+
+C<starman> executable is basically the equivalent of using C<plackup>
+with C<Starman> server handler i.e. C<plackup -s Starman>, except that
+C<starman> delay loads the application with the Delayed loader by
+default, which can be disabled with C<--preload-app>.
+
+C<starman> command also automatically sets the environment (C<-E>) to
+the value of I<deployment>.
+
+You're recommended to use C<starman> unless there's a reason to stick to
+C<plackup> for compatiblity.
 
 =head1 SSL SUPPORT
 
